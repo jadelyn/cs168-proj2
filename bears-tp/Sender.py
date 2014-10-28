@@ -1,5 +1,6 @@
 import sys
 import getopt
+import time
 
 import Checksum
 import BasicSender
@@ -12,17 +13,21 @@ class Sender(BasicSender.BasicSender):
         super(Sender, self).__init__(dest, port, filename, debug)
         if sackMode:
             raise NotImplementedError #remove this line when you implement SACK
-        packets = {} # dictionary containing packets mapped to their sequence numbers
-        acks = {} # dict mapping # acks per seq number
-
+        self.packets = {} # dictionary containing packets mapped to their sequence numbers
+        self.acks = {} # dict mapping # acks per seq number
+        self.lastSeqNo = float("inf")-1
+        self.base = None
+        self.N = 5
+        self.dataSize = 1300
 
     # Main sending loop.
     def start(self):
         initialSeqNo = 0
-        N = 5
-        dataSize = 1300
-        startData = self.infile.read(dataSize)
+        print self.packets
+        
+        startData = self.infile.read(self.dataSize)
         firstPacket = self.make_packet("start", initialSeqNo, startData)
+        self.packets[0] = firstPacket
         self.send(firstPacket)
         startTime = time.clock()
         while (True):
@@ -33,16 +38,20 @@ class Sender(BasicSender.BasicSender):
             elif Checksum.validate_checksum(response):
                 break
 
-        base = 1
+        self.base = 1
+        
 
-        for i in range(1, N):
-            data = self.infile.read(dataSize)
-            if len(data) < dataSize:
+        for i in range(1, self.N):
+            data = self.infile.read(self.dataSize)
+            if len(data) < self.dataSize:
                 packet = self.make_packet("end", i, data)
+                self.packets[i] = packet
+                self.lastSeqNo = i
                 self.send(packet)
                 break
             else:
                 packet = self.make_packet("data", i, data)
+                self.packets[i] = packet
                 self.send(packet)
         startTime = time.clock()
 
@@ -53,44 +62,62 @@ class Sender(BasicSender.BasicSender):
             elif not Checksum.validate_checksum(receivedPacket):
                 pass
             else:
-                msgType, seqNo, data, checkSum = self.split_packet(receivedPacket)
-                if not seqNo in acks:
-                    acks[seqNo] = 1
+                msgType, seqNoStr, data, checkSum = self.split_packet(receivedPacket)
+                seqNo = int(seqNoStr)
+                if seqNo == self.lastSeqNo+1:
+                    break
+                if not seqNo in self.acks:
+                    self.acks[seqNo] = 1
                     self.handle_new_ack(seqNo)
                 else:
-                    acks[seqNo]++
+                    self.acks[seqNo] += 1
                     self.handle_dup_ack(seqNo)
 
-
-
-
     def handle_timeout(self):
-        pass
+        if self.lastSeqNo < self.base+self.N-1:
+            for i in range(self.base, self.lastSeqNo+1):
+                self.send(self.packets[i])
+        else:
+            for i in range(self.base, self.base+self.N):
+                self.send(self.packets[i])
 
     def handle_new_ack(self, ack):
         msgType = None
-        if seqNo == base + 1:
-            packets.remove(base)
-            base++
+        if ack == self.base + 1:
+            del self.packets[self.base]
+            self.base += 1
 
-        else if seqNo > base + 1: 
-            for i in range(base, seqNo-1):
-                packets.remove(i)
-            base = seqNo 
+        elif ack > self.base + 1: 
+            for i in range(self.base, ack):
+                del self.packets[i]
+            oldBase = self.base
+            self.base = ack 
+            for i in range(oldBase+self.N-1, self.base+self.N):
+                thisPacketsData = self.infile.read(self.dataSize)
+                if len(thisPacketsData) < self.dataSize:
+                    self.lastSeqNo = i
+                    thisPacket = self.make_packet("end", i, thisPacketsData)
+                    packets[i] = thisPacket
+                    startTime = time.clock()
+                    self.send(thisPacket)
+                    break
+                else:
+                    thisPacket = self.make_packet("data", i, thisPacketsData)
+                    packets[i] = thisPacket
+                    startTime = time.clock()
+                    self.send(thisPacket)
 
-        thisPacketsData = self.infile.read(dataSize)
-        if len(thisPacketsData) < dataSize:
-            msgType = "end"
-        else:
-            msgType = "data"
-        thisPacket = self.make_packet(msgType, base + N - 1, thisPacketsData)
-        packets[base+N-1] = thisPacket
-        self.send(thisPacket)
-        startTime = time.clocK()
-
+      
 
     def handle_dup_ack(self, ack):
-        pass
+        if self.acks[ack] > 3:
+            if self.lastSeqNo < self.base+self.N-1:
+                for i in range(self.base, self.lastSeqNo+1):
+                    self.send(self.packets[i])
+            else:
+                for i in range(self.base, self.base+self.N):
+                    self.send(self.packets[i])
+
 
     def log(self, msg):
         if self.debug:
